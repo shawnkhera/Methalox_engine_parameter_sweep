@@ -1,0 +1,673 @@
+% NASA CEA Methalox O/F Sweep at 5 Chamber Pressures
+% ASCII ONLY VERSION
+%
+% This script uses the Python interpreter already loaded by MATLAB.
+% It does not change pyenv.
+%
+% Five chamber pressures are compared on every plot:
+%   10, 20, 30, 40, and 50 bar
+%
+% Assumptions:
+%   Fuel          = CH4(L)
+%   Oxidizer      = O2(L)
+%   Exit pressure = 1 bar
+%   Target thrust = 3000 N
+%   O/F range     = 1.50 to 4.00
+%   "Y"           = gamma
+
+clearvars;
+clc;
+close all;
+
+%% USER INPUTS
+
+% Five chamber pressures to compare.
+Pc_values_bar = [10 20 30 40 50];
+
+% Target exit pressure.
+Pe_target_bar = 1.0;
+
+% Target thrust.
+Thrust_N = 3000.0;
+
+% Reactant temperatures.
+T_CH4_K = 111.7;
+T_LOX_K = 90.17;
+
+% O/F sweep.
+OF_min = 1.50;
+OF_max = 4.00;
+OF_step = 0.025;
+
+% Standard gravity.
+g0 = 9.80665;
+
+%% MATLAB PYTHON CONFIGURATION
+
+pe = pyenv;
+
+fprintf('\n');
+fprintf('===============================================\n');
+fprintf('MATLAB PYTHON CONFIGURATION\n');
+fprintf('===============================================\n');
+fprintf('Python version:    %s\n', char(pe.Version));
+fprintf('Python executable: %s\n', char(pe.Executable));
+fprintf('Python status:     %s\n', char(pe.Status));
+fprintf('===============================================\n');
+
+if strcmp(char(pe.Status), 'NotLoaded')
+    error(['Python is not loaded in MATLAB.' newline ...
+           'Run pyenv in the Command Window and then run this script again.']);
+end
+
+%% IMPORT NUMPY
+
+try
+    np = py.importlib.import_module('numpy');
+    fprintf('NumPy import: OK\n');
+catch ME
+    error(['NumPy could not be imported by MATLAB.' newline ...
+           'Install NumPy into the Python environment shown above.' newline ...
+           'Original error:' newline ME.message]);
+end
+
+%% IMPORT NASA CEA
+
+try
+    cea = py.importlib.import_module('cea');
+    fprintf('NASA CEA import: OK\n');
+catch ME
+    error(['NASA CEA could not be imported.' newline ...
+           'Install it into the Python environment shown above.' newline ...
+           'Use Windows CMD:' newline ...
+           'python -m pip install -U cea' newline ...
+           'Original error:' newline ME.message]);
+end
+
+try
+    ceam = py.importlib.import_module('cea.matlab');
+    fprintf('cea.matlab import: OK\n');
+catch ME
+    error(['cea.matlab could not be imported.' newline ...
+           'Update NASA CEA using:' newline ...
+           'python -m pip install -U cea' newline ...
+           'Original error:' newline ME.message]);
+end
+
+%% DEFINE REACTANTS
+
+reactants = py.list({'CH4(L)', 'O2(L)'});
+
+% Fuel vector:
+% CH4 = 1
+% O2  = 0
+fuel_amounts = np.array([1.0 0.0]);
+
+% Oxidizer vector:
+% CH4 = 0
+% O2  = 1
+oxid_amounts = np.array([0.0 1.0]);
+
+% Reactant temperatures.
+T_reac = np.array([T_CH4_K T_LOX_K]);
+
+%% O/F ARRAY
+
+OF_values = OF_min:OF_step:OF_max;
+N_OF = length(OF_values);
+N_Pc = length(Pc_values_bar);
+
+%% PREALLOCATE RESULTS
+
+Isp_s = NaN(N_Pc,N_OF);
+Isp_vac_s = NaN(N_Pc,N_OF);
+Cstar_mps = NaN(N_Pc,N_OF);
+Tc_K = NaN(N_Pc,N_OF);
+Gamma = NaN(N_Pc,N_OF);
+Ae_At = NaN(N_Pc,N_OF);
+Cf = NaN(N_Pc,N_OF);
+Pe_bar = NaN(N_Pc,N_OF);
+Mdot_kg_s = NaN(N_Pc,N_OF);
+Converged = false(N_Pc,N_OF);
+
+%% START CEA CALCULATIONS
+
+fprintf('\n');
+fprintf('===============================================\n');
+fprintf('STARTING 5-PRESSURE NASA CEA O/F SWEEP\n');
+fprintf('===============================================\n');
+fprintf('Chamber pressures = ');
+
+for p = 1:N_Pc
+    fprintf('%.0f bar', Pc_values_bar(p));
+    if p < N_Pc
+        fprintf(', ');
+    end
+end
+
+fprintf('\n');
+fprintf('Exit pressure     = %.2f bar\n', Pe_target_bar);
+fprintf('Target thrust     = %.1f N\n', Thrust_N);
+fprintf('O/F range         = %.3f to %.3f\n', OF_min, OF_max);
+fprintf('O/F step          = %.3f\n', OF_step);
+fprintf('O/F points        = %d\n', N_OF);
+fprintf('Total CEA runs    = %d\n', N_Pc*N_OF);
+fprintf('===============================================\n\n');
+
+%% MAIN PRESSURE AND O/F LOOPS
+
+for p = 1:N_Pc
+
+    Pc_bar = Pc_values_bar(p);
+
+    % Chamber-to-exit pressure ratio.
+    pi_p = np.array(Pc_bar / Pe_target_bar);
+
+    fprintf('\n');
+    fprintf('-----------------------------------------------\n');
+    fprintf('CHAMBER PRESSURE = %.1f bar\n', Pc_bar);
+    fprintf('-----------------------------------------------\n');
+
+    for k = 1:N_OF
+
+        current_OF = OF_values(k);
+
+        try
+
+            solution = ceam.rocket_solve( ...
+                reactants, ...
+                Pc_bar, ...
+                pyargs( ...
+                'pi_p', pi_p, ...
+                'T_reac', T_reac, ...
+                'fuel_amounts', fuel_amounts, ...
+                'oxid_amounts', oxid_amounts, ...
+                'of_ratio', current_OF, ...
+                'iac', true));
+
+            % Number of CEA stations.
+            npts = double(solution.num_pts);
+
+            % Convert Python arrays to MATLAB arrays.
+            T_all = double(solution.T);
+            P_all = double(solution.P);
+            gamma_all = double(solution.gamma_s);
+            cstar_all = double(solution.c_star);
+            cf_all = double(solution.coefficient_of_thrust);
+            isp_all = double(solution.Isp);
+            isp_vac_all = double(solution.Isp_vacuum);
+            aeat_all = double(solution.ae_at);
+
+            % Chamber properties.
+            Tc_K(p,k) = T_all(1);
+            Gamma(p,k) = gamma_all(1);
+            Cstar_mps(p,k) = cstar_all(1);
+
+            % Exit properties.
+            Isp_s(p,k) = isp_all(npts) / g0;
+            Isp_vac_s(p,k) = isp_vac_all(npts) / g0;
+            Ae_At(p,k) = aeat_all(npts);
+            Cf(p,k) = cf_all(npts);
+            Pe_bar(p,k) = P_all(npts);
+
+            % Mass flow required for 3 kN using vacuum Isp.
+            if Isp_vac_s(p,k) > 0
+                Mdot_kg_s(p,k) = ...
+                    Thrust_N / (Isp_vac_s(p,k) * g0);
+            end
+
+            Converged(p,k) = logical(solution.converged);
+
+        catch ME
+
+            fprintf('\n');
+            fprintf('CEA FAILED: Pc = %.1f bar, O/F = %.3f\n', ...
+                Pc_bar, current_OF);
+            fprintf('Error: %s\n', ME.message);
+            fprintf('\n');
+
+        end
+
+        % Print progress every 10 O/F points and at the final point.
+        if mod(k,10) == 0 || k == N_OF
+
+            if isfinite(Isp_s(p,k))
+
+                fprintf(['Pc = %5.1f bar | O/F = %6.3f | ' ...
+                         'Isp = %8.3f s | Tc = %8.2f K | ' ...
+                         'Cstar = %8.2f m/s\n'], ...
+                         Pc_bar, current_OF, Isp_s(p,k), ...
+                         Tc_K(p,k), Cstar_mps(p,k));
+
+            else
+
+                fprintf(['Pc = %5.1f bar | O/F = %6.3f | ' ...
+                         'CEA result invalid\n'], ...
+                         Pc_bar, current_OF);
+
+            end
+
+        end
+
+    end
+
+end
+
+%% CHECK RESULTS
+
+if ~any(isfinite(Isp_s(:)))
+
+    error(['NASA CEA returned zero valid Isp values.' newline ...
+           'The CEA calculation did not produce usable results.']);
+end
+
+%% FIND OPTIMUM VALUES FOR EACH CHAMBER PRESSURE
+
+OF_at_max_Isp = NaN(1,N_Pc);
+Max_Isp = NaN(1,N_Pc);
+
+OF_at_min_Tc = NaN(1,N_Pc);
+Min_Tc = NaN(1,N_Pc);
+
+OF_at_max_Cstar = NaN(1,N_Pc);
+Max_Cstar = NaN(1,N_Pc);
+
+for p = 1:N_Pc
+
+    valid_Isp = isfinite(Isp_s(p,:));
+
+    if any(valid_Isp)
+
+        of_temp = OF_values(valid_Isp);
+        isp_temp = Isp_s(p,valid_Isp);
+
+        [Max_Isp(p), idx] = max(isp_temp);
+        OF_at_max_Isp(p) = of_temp(idx);
+
+    end
+
+    valid_Tc = isfinite(Tc_K(p,:));
+
+    if any(valid_Tc)
+
+        of_temp = OF_values(valid_Tc);
+        tc_temp = Tc_K(p,valid_Tc);
+
+        [Min_Tc(p), idx] = min(tc_temp);
+        OF_at_min_Tc(p) = of_temp(idx);
+
+    end
+
+    valid_Cstar = isfinite(Cstar_mps(p,:));
+
+    if any(valid_Cstar)
+
+        of_temp = OF_values(valid_Cstar);
+        cstar_temp = Cstar_mps(p,valid_Cstar);
+
+        [Max_Cstar(p), idx] = max(cstar_temp);
+        OF_at_max_Cstar(p) = of_temp(idx);
+
+    end
+
+end
+
+%% PRINT OPTIMUM RESULTS
+
+fprintf('\n');
+fprintf('===============================================================\n');
+fprintf('OPTIMUM RESULTS FOR EACH CHAMBER PRESSURE\n');
+fprintf('===============================================================\n');
+
+fprintf('\n');
+fprintf('Pc (bar)    O/F at max Isp    Max Isp (s)    O/F at min Tc    Min Tc (K)\n');
+fprintf('-----------------------------------------------------------------------\n');
+
+for p = 1:N_Pc
+
+    fprintf('%7.1f    %15.4f    %11.4f    %15.4f    %11.2f\n', ...
+        Pc_values_bar(p), ...
+        OF_at_max_Isp(p), ...
+        Max_Isp(p), ...
+        OF_at_min_Tc(p), ...
+        Min_Tc(p));
+
+end
+
+fprintf('\n');
+fprintf('Pc (bar)    O/F at max Cstar    Max Cstar (m/s)\n');
+fprintf('-------------------------------------------------\n');
+
+for p = 1:N_Pc
+
+    fprintf('%7.1f    %17.4f    %15.2f\n', ...
+        Pc_values_bar(p), ...
+        OF_at_max_Cstar(p), ...
+        Max_Cstar(p));
+
+end
+
+%% CREATE LONG-FORM RESULTS TABLE
+
+total_rows = N_Pc * N_OF;
+
+Pc_column = zeros(total_rows,1);
+OF_column = zeros(total_rows,1);
+Isp_column = NaN(total_rows,1);
+IspVac_column = NaN(total_rows,1);
+Cstar_column = NaN(total_rows,1);
+Tc_column = NaN(total_rows,1);
+Gamma_column = NaN(total_rows,1);
+AeAt_column = NaN(total_rows,1);
+Cf_column = NaN(total_rows,1);
+Pe_column = NaN(total_rows,1);
+Mdot_column = NaN(total_rows,1);
+
+row = 0;
+
+for p = 1:N_Pc
+
+    for k = 1:N_OF
+
+        row = row + 1;
+
+        Pc_column(row) = Pc_values_bar(p);
+        OF_column(row) = OF_values(k);
+
+        Isp_column(row) = Isp_s(p,k);
+        IspVac_column(row) = Isp_vac_s(p,k);
+        Cstar_column(row) = Cstar_mps(p,k);
+        Tc_column(row) = Tc_K(p,k);
+        Gamma_column(row) = Gamma(p,k);
+        AeAt_column(row) = Ae_At(p,k);
+        Cf_column(row) = Cf(p,k);
+        Pe_column(row) = Pe_bar(p,k);
+        Mdot_column(row) = Mdot_kg_s(p,k);
+
+    end
+
+end
+
+Results = table( ...
+    Pc_column, ...
+    OF_column, ...
+    Isp_column, ...
+    IspVac_column, ...
+    Cstar_column, ...
+    Tc_column, ...
+    Gamma_column, ...
+    AeAt_column, ...
+    Cf_column, ...
+    Pe_column, ...
+    Mdot_column, ...
+    'VariableNames', { ...
+    'Pc_bar', ...
+    'OF', ...
+    'Isp_s', ...
+    'IspVac_s', ...
+    'Cstar_mps', ...
+    'Tc_K', ...
+    'Gamma', ...
+    'Ae_At', ...
+    'Cf', ...
+    'Pe_bar', ...
+    'Mdot_kg_s'});
+
+fprintf('\n');
+fprintf('FULL RESULTS TABLE:\n');
+disp(Results);
+
+%% CREATE OPTIMUM SUMMARY TABLE
+
+OptimumResults = table( ...
+    Pc_values_bar(:), ...
+    OF_at_max_Isp(:), ...
+    Max_Isp(:), ...
+    OF_at_min_Tc(:), ...
+    Min_Tc(:), ...
+    OF_at_max_Cstar(:), ...
+    Max_Cstar(:), ...
+    'VariableNames', { ...
+    'Pc_bar', ...
+    'OF_at_max_Isp', ...
+    'Max_Isp_s', ...
+    'OF_at_min_Tc', ...
+    'Min_Tc_K', ...
+    'OF_at_max_Cstar', ...
+    'Max_Cstar_mps'});
+
+fprintf('\n');
+fprintf('OPTIMUM SUMMARY TABLE:\n');
+disp(OptimumResults);
+
+%% SAVE RESULTS
+
+writetable(Results, ...
+    'NASA_CEA_Methalox_5Pressure_OF_Sweep.csv');
+
+writetable(OptimumResults, ...
+    'NASA_CEA_Methalox_5Pressure_Optimums.csv');
+
+fprintf('\n');
+fprintf('Saved:\n');
+fprintf('NASA_CEA_Methalox_5Pressure_OF_Sweep.csv\n');
+fprintf('NASA_CEA_Methalox_5Pressure_Optimums.csv\n');
+
+%% PLOT 1 - ISP VS O/F FOR ALL 5 PRESSURES
+
+figure;
+
+hold on;
+
+for p = 1:N_Pc
+    plot(OF_values, Isp_s(p,:), 'LineWidth', 2);
+end
+
+grid on;
+
+xlabel('O/F ratio');
+ylabel('Isp (s)');
+title('NASA CEA - Isp vs O/F at 5 Chamber Pressures');
+
+legend( ...
+    'Pc = 10 bar', ...
+    'Pc = 20 bar', ...
+    'Pc = 30 bar', ...
+    'Pc = 40 bar', ...
+    'Pc = 50 bar', ...
+    'Location', 'best');
+
+hold off;
+
+%% PLOT 2 - CSTAR VS O/F FOR ALL 5 PRESSURES
+
+figure;
+
+hold on;
+
+for p = 1:N_Pc
+    plot(OF_values, Cstar_mps(p,:), 'LineWidth', 2);
+end
+
+grid on;
+
+xlabel('O/F ratio');
+ylabel('Cstar (m/s)');
+title('NASA CEA - Cstar vs O/F at 5 Chamber Pressures');
+
+legend( ...
+    'Pc = 10 bar', ...
+    'Pc = 20 bar', ...
+    'Pc = 30 bar', ...
+    'Pc = 40 bar', ...
+    'Pc = 50 bar', ...
+    'Location', 'best');
+
+hold off;
+
+%% PLOT 3 - GAMMA VS O/F FOR ALL 5 PRESSURES
+
+figure;
+
+hold on;
+
+for p = 1:N_Pc
+    plot(OF_values, Gamma(p,:), 'LineWidth', 2);
+end
+
+grid on;
+
+xlabel('O/F ratio');
+ylabel('Gamma');
+title('NASA CEA - Gamma vs O/F at 5 Chamber Pressures');
+
+legend( ...
+    'Pc = 10 bar', ...
+    'Pc = 20 bar', ...
+    'Pc = 30 bar', ...
+    'Pc = 40 bar', ...
+    'Pc = 50 bar', ...
+    'Location', 'best');
+
+hold off;
+
+%% PLOT 4 - CHAMBER TEMPERATURE VS O/F
+
+figure;
+
+hold on;
+
+for p = 1:N_Pc
+    plot(OF_values, Tc_K(p,:), 'LineWidth', 2);
+end
+
+grid on;
+
+xlabel('O/F ratio');
+ylabel('Chamber temperature (K)');
+title('NASA CEA - Chamber Temperature vs O/F at 5 Chamber Pressures');
+
+legend( ...
+    'Pc = 10 bar', ...
+    'Pc = 20 bar', ...
+    'Pc = 30 bar', ...
+    'Pc = 40 bar', ...
+    'Pc = 50 bar', ...
+    'Location', 'best');
+
+hold off;
+
+%% PLOT 5 - EXIT PRESSURE VS O/F
+
+figure;
+
+hold on;
+
+for p = 1:N_Pc
+    plot(OF_values, Pe_bar(p,:), 'LineWidth', 2);
+end
+
+grid on;
+
+xlabel('O/F ratio');
+ylabel('Exit pressure (bar)');
+title('NASA CEA - Exit Pressure vs O/F at 5 Chamber Pressures');
+
+legend( ...
+    'Pc = 10 bar', ...
+    'Pc = 20 bar', ...
+    'Pc = 30 bar', ...
+    'Pc = 40 bar', ...
+    'Pc = 50 bar', ...
+    'Location', 'best');
+
+hold off;
+
+%% PLOT 6 - REQUIRED MASS FLOW VS O/F
+
+figure;
+
+hold on;
+
+for p = 1:N_Pc
+    plot(OF_values, Mdot_kg_s(p,:), 'LineWidth', 2);
+end
+
+grid on;
+
+xlabel('O/F ratio');
+ylabel('Mass flow (kg/s)');
+title('3 kN Required Mass Flow vs O/F at 5 Chamber Pressures');
+
+legend( ...
+    'Pc = 10 bar', ...
+    'Pc = 20 bar', ...
+    'Pc = 30 bar', ...
+    'Pc = 40 bar', ...
+    'Pc = 50 bar', ...
+    'Location', 'best');
+
+hold off;
+
+%% PLOT 7 - AREA RATIO VS O/F
+
+figure;
+
+hold on;
+
+for p = 1:N_Pc
+    plot(OF_values, Ae_At(p,:), 'LineWidth', 2);
+end
+
+grid on;
+
+xlabel('O/F ratio');
+ylabel('Ae/At');
+title('NASA CEA - Nozzle Area Ratio vs O/F at 5 Chamber Pressures');
+
+legend( ...
+    'Pc = 10 bar', ...
+    'Pc = 20 bar', ...
+    'Pc = 30 bar', ...
+    'Pc = 40 bar', ...
+    'Pc = 50 bar', ...
+    'Location', 'best');
+
+hold off;
+
+%% PLOT 8 - THRUST COEFFICIENT VS O/F
+
+figure;
+
+hold on;
+
+for p = 1:N_Pc
+    plot(OF_values, Cf(p,:), 'LineWidth', 2);
+end
+
+grid on;
+
+xlabel('O/F ratio');
+ylabel('Thrust coefficient, Cf');
+title('NASA CEA - Thrust Coefficient vs O/F at 5 Chamber Pressures');
+
+legend( ...
+    'Pc = 10 bar', ...
+    'Pc = 20 bar', ...
+    'Pc = 30 bar', ...
+    'Pc = 40 bar', ...
+    'Pc = 50 bar', ...
+    'Location', 'best');
+
+hold off;
+
+%% FINAL MESSAGE
+
+fprintf('\n');
+fprintf('===============================================================\n');
+fprintf('NASA CEA 5-PRESSURE O/F SWEEP COMPLETED\n');
+fprintf('===============================================================\n');
+fprintf('Pressures analyzed: 10, 20, 30, 40, 50 bar\n');
+fprintf('Total CEA calculations: %d\n', N_Pc*N_OF);
+fprintf('Eight comparison plots have been generated.\n');
+fprintf('===============================================================\n');
